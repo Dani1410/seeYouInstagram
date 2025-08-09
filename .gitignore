@@ -1,0 +1,61 @@
+# Archivo de configuración para Python
+
+# Archivos del entorno virtual
+venv/
+.venv/
+env/
+.env/
+
+# Archivos de Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Datos de monitoreo (opcional - descomenta si no quieres versionar los datos)
+# datos_monitoreo/
+# *.json
+# *_session
+
+# Archivos de configuración del IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Archivos del sistema
+.DS_Store
+Thumbs.db
+.directory
+
+# Logs
+*.log
+
+# Archivos de sesión de Instagram (por seguridad)
+*_session
+*.session
+
+# Variables de entorno
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local

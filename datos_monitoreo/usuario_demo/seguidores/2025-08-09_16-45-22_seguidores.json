@@ -1,0 +1,16 @@
+{
+  "username": "usuario_demo",
+  "fecha_actualizacion": "2025-08-09T16:45:22.654321",
+  "timestamp": "2025-08-09_16-45-22",
+  "seguidores": [
+    "usuario1",
+    "usuario2",
+    "usuario3",
+    "nuevo_seguidor1",
+    "nuevo_seguidor2",
+    "seguidor_reciente1",
+    "seguidor_reciente2"
+  ],
+  "total_seguidores": 7,
+  "tipo": "seguidores"
+}
