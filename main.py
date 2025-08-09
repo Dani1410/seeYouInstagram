@@ -39,6 +39,14 @@ def verificar_dependencias():
         print(f"\n{Fore.YELLOW}💡 Instálalas con: pip install {' '.join(dependencias_faltantes)}{Style.RESET_ALL}")
         return False
     
+    # Mostrar advertencia de seguridad la primera vez
+    try:
+        with open('config_seguridad.py', 'r', encoding='utf-8') as f:
+            pass
+        print(f"{Fore.CYAN}🛡️ Configuración de seguridad cargada desde config_seguridad.py{Style.RESET_ALL}")
+    except FileNotFoundError:
+        print(f"{Fore.YELLOW}⚠️ No se encontró config_seguridad.py - usando configuración por defecto{Style.RESET_ALL}")
+    
     return True
 
 def mostrar_logo():
@@ -56,7 +64,8 @@ def mostrar_menu_principal():
     print(f"{Fore.WHITE}2. {Fore.BLUE}Monitoreo de Perfil")
     print(f"{Fore.WHITE}3. {Fore.MAGENTA}Análisis de Conexiones")
     print(f"{Fore.WHITE}4. {Fore.CYAN}Ver Estado de la Sesión")
-    print(f"{Fore.WHITE}5. {Fore.RED}Salir{Style.RESET_ALL}")
+    print(f"{Fore.WHITE}5. {Fore.YELLOW}🌐 Modo Solo Perfiles Públicos")
+    print(f"{Fore.WHITE}6. {Fore.RED}Salir{Style.RESET_ALL}")
     print("-" * 40)
 
 def mostrar_menu_sesiones():
@@ -160,6 +169,75 @@ def manejar_conexiones(monitor):
         else:
             print(f"{Fore.RED}Opción no válida. Intenta de nuevo.{Style.RESET_ALL}")
 
+def manejar_modo_publico(monitor):
+    """Maneja el modo solo perfiles públicos"""
+    print(f"\n{Fore.CYAN}🌐 MODO SOLO PERFILES PÚBLICOS{Style.RESET_ALL}")
+    
+    if monitor.esta_en_modo_publico():
+        print(f"{Fore.GREEN}✅ Ya estás en modo público{Style.RESET_ALL}")
+        
+        # Mostrar opciones disponibles en modo público
+        while True:
+            print(f"\n{Fore.YELLOW}OPCIONES EN MODO PÚBLICO:{Style.RESET_ALL}")
+            print(f"{Fore.WHITE}1. {Fore.BLUE}Ver Información de Perfil")
+            print(f"{Fore.WHITE}2. {Fore.MAGENTA}Monitorear Perfil Público (limitado)")
+            print(f"{Fore.WHITE}3. {Fore.CYAN}Ver Estado del Modo")
+            print(f"{Fore.WHITE}4. {Fore.YELLOW}Desactivar Modo Público")
+            print(f"{Fore.WHITE}5. {Fore.RED}Volver al Menú Principal{Style.RESET_ALL}")
+            print("-" * 40)
+            
+            opcion = input(f"{Fore.CYAN}Selecciona una opción: {Style.RESET_ALL}")
+            
+            if opcion == "1":
+                # Ver información básica del perfil
+                username = input(f"{Fore.CYAN}Nombre de usuario a analizar: {Style.RESET_ALL}")
+                if username.strip():
+                    monitor.obtener_info_perfil_publico(username.strip())
+                else:
+                    print(f"{Fore.RED}❌ Debes ingresar un nombre de usuario{Style.RESET_ALL}")
+                    
+            elif opcion == "2":
+                # Monitorear perfil público (limitado)
+                print(f"{Fore.YELLOW}⚠️ ADVERTENCIA: Esta función está limitada en modo público{Style.RESET_ALL}")
+                print(f"{Fore.YELLOW}• No puede obtener listas de seguidores/seguidos{Style.RESET_ALL}")
+                print(f"{Fore.YELLOW}• Solo mostrará información básica del perfil{Style.RESET_ALL}")
+                if confirmar_accion("¿Continuar de todos modos?"):
+                    username = input(f"{Fore.CYAN}Nombre de usuario a monitorear: {Style.RESET_ALL}")
+                    if username.strip():
+                        monitor.monitorear_perfil(username.strip())
+                    else:
+                        print(f"{Fore.RED}❌ Debes ingresar un nombre de usuario{Style.RESET_ALL}")
+                    
+            elif opcion == "3":
+                # Ver estado
+                print(f"\n{Fore.GREEN}📊 ESTADO DEL MODO PÚBLICO:{Style.RESET_ALL}")
+                print(f"  🌐 Modo: Solo perfiles públicos")
+                print(f"  🔓 Autenticación: No requerida")
+                print(f"  👁️ Acceso: Solo información básica")
+                print(f"  📊 Listas seguidores/seguidos: No disponibles")
+                print(f"  🛡️ Riesgo de detección: Muy bajo")
+                print(f"\n{Fore.CYAN}💡 Para funcionalidad completa, inicia sesión desde el menú principal{Style.RESET_ALL}")
+                
+            elif opcion == "4":
+                # Desactivar modo público
+                if confirmar_accion("¿Desactivar modo público?"):
+                    monitor.modo_publico = False
+                    monitor.username_actual = None
+                    print(f"{Fore.GREEN}✅ Modo público desactivado{Style.RESET_ALL}")
+                    break
+                    
+            elif opcion == "5":
+                break
+                
+            else:
+                print(f"{Fore.RED}Opción no válida. Intenta de nuevo.{Style.RESET_ALL}")
+    else:
+        # Activar modo público
+        if monitor.activar_modo_publico():
+            print(f"{Fore.GREEN}✅ Modo público activado exitosamente{Style.RESET_ALL}")
+            # Llamar recursivamente para mostrar las opciones
+            manejar_modo_publico(monitor)
+
 def main():
     """Función principal del programa"""
     mostrar_logo()
@@ -175,14 +253,14 @@ def main():
             manejar_sesiones(monitor)
             
         elif opcion == "2":
-            if not monitor.sesion_activa:
-                print(f"{Fore.RED}❌ Necesitas iniciar sesión primero.{Style.RESET_ALL}")
+            if not monitor.sesion_activa and not monitor.modo_publico:
+                print(f"{Fore.RED}❌ Necesitas iniciar sesión o activar modo público primero.{Style.RESET_ALL}")
                 continue
             manejar_monitoreo(monitor)
             
         elif opcion == "3":
-            if not monitor.sesion_activa:
-                print(f"{Fore.RED}❌ Necesitas iniciar sesión primero.{Style.RESET_ALL}")
+            if not monitor.sesion_activa and not monitor.modo_publico:
+                print(f"{Fore.RED}❌ Necesitas iniciar sesión o activar modo público primero.{Style.RESET_ALL}")
                 continue
             manejar_conexiones(monitor)
             
@@ -190,6 +268,9 @@ def main():
             monitor.mostrar_estado_sesion()
             
         elif opcion == "5":
+            manejar_modo_publico(monitor)
+            
+        elif opcion == "6":
             print(f"{Fore.GREEN}¡Gracias por usar SeeYouInstagram! 👋{Style.RESET_ALL}")
             break
             

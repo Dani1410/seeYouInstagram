@@ -8,6 +8,8 @@ Contiene la clase InstagramMonitor con todas las funcionalidades
 import json
 import os
 import pickle
+import time
+import random
 from datetime import datetime
 from typing import Set, Dict, List, Optional
 import instaloader
@@ -22,15 +24,360 @@ class InstagramMonitor:
     """Clase principal para el monitoreo de Instagram"""
     
     def __init__(self):
-        """Inicializa el monitor de Instagram"""
-        self.loader = instaloader.Instaloader()
+        """Inicializa el monitor de Instagram con configuración conservadora"""
+        # Configurar instaloader con delays para evitar detección
+        self.loader = instaloader.Instaloader(
+            download_pictures=False,
+            download_videos=False,
+            download_video_thumbnails=False,
+            download_geotags=False,
+            download_comments=False,
+            save_metadata=False,
+            compress_json=False,
+            post_metadata_txt_pattern="",
+            storyitem_metadata_txt_pattern="",
+            max_connection_attempts=3,
+            request_timeout=300
+        )
+        
         self.sesion_activa = False
         self.username_actual = None
+        self.modo_publico = False  # Nuevo: modo solo perfiles públicos
+        
+        # Contadores para manejo conservador de requests
+        self.requests_count = 0
+        self.last_request_time = time.time()
+        self.MAX_REQUESTS_PER_MINUTE = 15  # Muy conservador
         
         # Crear directorio de datos si no existe
         self.directorio_datos = "datos_monitoreo"
         if not os.path.exists(self.directorio_datos):
             os.makedirs(self.directorio_datos)
+    
+    def _wait_if_needed(self):
+        """
+        Implementa delays inteligentes para evitar detección de automatización
+        """
+        current_time = time.time()
+        time_since_last = current_time - self.last_request_time
+        
+        # Si han pasado más de 60 segundos, resetear contador
+        if time_since_last > 60:
+            self.requests_count = 0
+        
+        # Si hemos hecho muchos requests recientemente, esperar más
+        if self.requests_count >= self.MAX_REQUESTS_PER_MINUTE:
+            wait_time = 60 - time_since_last
+            if wait_time > 0:
+                print(f"{Fore.YELLOW}⏳ Esperando {int(wait_time)} segundos para respetar límites de Instagram...{Style.RESET_ALL}")
+                time.sleep(wait_time)
+                self.requests_count = 0
+        
+        # Delay aleatorio entre requests (2-5 segundos)
+        delay = random.uniform(2.0, 5.0)
+        time.sleep(delay)
+        
+        self.requests_count += 1
+        self.last_request_time = time.time()
+    
+    def _handle_rate_limit_error(self, error_msg: str) -> bool:
+        """
+        Maneja errores de rate limiting de Instagram
+        
+        Args:
+            error_msg: Mensaje de error
+            
+        Returns:
+            bool: True si se debe reintentar, False si es un error permanente
+        """
+        if "Please wait" in error_msg or "Try again later" in error_msg or "rate limit" in error_msg.lower():
+            print(f"{Fore.YELLOW}⚠️ Instagram ha detectado actividad automatizada{Style.RESET_ALL}")
+            print(f"{Fore.YELLOW}💡 Esto es normal al usar herramientas de monitoreo{Style.RESET_ALL}")
+            
+            if confirmar_accion("¿Esperar 10 minutos y continuar? (recomendado)"):
+                print(f"{Fore.CYAN}⏳ Esperando 10 minutos para respetar los límites de Instagram...{Style.RESET_ALL}")
+                for i in range(600, 0, -30):  # 10 minutos en bloques de 30 segundos
+                    mins, secs = divmod(i, 60)
+                    print(f"\r{Fore.CYAN}⏳ Tiempo restante: {mins:02d}:{secs:02d}{Style.RESET_ALL}", end="", flush=True)
+                    time.sleep(30)
+                print(f"\n{Fore.GREEN}✅ Listo para continuar{Style.RESET_ALL}")
+                return True
+            else:
+                print(f"{Fore.YELLOW}⚠️ Operación cancelada por el usuario{Style.RESET_ALL}")
+                return False
+        
+        return False
+    
+    def _guardar_datos_parciales(self, username: str, datos: Set[str], tipo: str, timestamp: str):
+        """
+        Guarda datos parciales durante el proceso de obtención para evitar pérdidas
+        
+        Args:
+            username: Nombre de usuario
+            datos: Conjunto de datos a guardar
+            tipo: Tipo de datos ('seguidores' o 'seguidos')
+            timestamp: Timestamp para el nombre del archivo
+        """
+        try:
+            carpetas = self.crear_estructura_usuario(username)
+            carpeta_tipo = carpetas[tipo]
+            
+            # Crear archivo temporal con sufijo _parcial
+            nombre_archivo = f"{timestamp}_{tipo}_parcial.json"
+            ruta_archivo = os.path.join(carpeta_tipo, nombre_archivo)
+            
+            datos_json = {
+                "usuario": username,
+                "tipo": tipo,
+                "timestamp": timestamp,
+                "fecha_obtencion": formatear_fecha(datetime.now()),
+                "total_obtenidos": len(datos),
+                "status": "parcial",
+                "datos": list(datos)
+            }
+            
+            with open(ruta_archivo, 'w', encoding='utf-8') as f:
+                json.dump(datos_json, f, indent=2, ensure_ascii=False)
+            
+            print(f"{Fore.CYAN}💾 Guardado parcial: {len(datos)} {tipo} en {nombre_archivo}{Style.RESET_ALL}")
+            
+        except Exception as e:
+            print(f"{Fore.YELLOW}⚠️ No se pudo guardar datos parciales: {str(e)}{Style.RESET_ALL}")
+    
+    def _finalizar_archivo_parcial(self, username: str, datos: Set[str], tipo: str, timestamp: str):
+        """
+        Convierte un archivo parcial en el archivo final y elimina el parcial
+        
+        Args:
+            username: Nombre de usuario
+            datos: Conjunto completo de datos
+            tipo: Tipo de datos ('seguidores' o 'seguidos')
+            timestamp: Timestamp para el nombre del archivo
+        """
+        try:
+            carpetas = self.crear_estructura_usuario(username)
+            carpeta_tipo = carpetas[tipo]
+            
+            # Nombres de archivos
+            archivo_parcial = f"{timestamp}_{tipo}_parcial.json"
+            archivo_final = f"{timestamp}_{tipo}.json"
+            ruta_parcial = os.path.join(carpeta_tipo, archivo_parcial)
+            ruta_final = os.path.join(carpeta_tipo, archivo_final)
+            
+            # Crear archivo final
+            datos_json = {
+                "usuario": username,
+                "tipo": tipo,
+                "timestamp": timestamp,
+                "fecha_obtencion": formatear_fecha(datetime.now()),
+                "total": len(datos),
+                "status": "completo",
+                "datos": list(datos)
+            }
+            
+            with open(ruta_final, 'w', encoding='utf-8') as f:
+                json.dump(datos_json, f, indent=2, ensure_ascii=False)
+            
+            # Eliminar archivo parcial si existe
+            if os.path.exists(ruta_parcial):
+                os.remove(ruta_parcial)
+                print(f"{Fore.GREEN}✅ Archivo final guardado: {archivo_final} (parcial eliminado){Style.RESET_ALL}")
+            else:
+                print(f"{Fore.GREEN}✅ Archivo final guardado: {archivo_final}{Style.RESET_ALL}")
+            
+        except Exception as e:
+            print(f"{Fore.YELLOW}⚠️ Error al finalizar archivo: {str(e)}{Style.RESET_ALL}")
+    
+    def _recuperar_datos_parciales(self, username: str, tipo: str) -> Optional[tuple]:
+        """
+        Recupera datos de un archivo parcial existente si hay uno
+        
+        Args:
+            username: Nombre de usuario
+            tipo: Tipo de datos ('seguidores' o 'seguidos')
+            
+        Returns:
+            Tuple (datos_recuperados, timestamp) o None si no hay archivo parcial
+        """
+        try:
+            carpetas = self.crear_estructura_usuario(username)
+            carpeta_tipo = carpetas[tipo]
+            
+            if not os.path.exists(carpeta_tipo):
+                return None
+            
+            # Buscar archivos parciales
+            archivos_parciales = [f for f in os.listdir(carpeta_tipo) if f.endswith(f'_{tipo}_parcial.json')]
+            
+            if not archivos_parciales:
+                return None
+            
+            # Tomar el más reciente
+            archivo_mas_reciente = sorted(archivos_parciales)[-1]
+            ruta_archivo = os.path.join(carpeta_tipo, archivo_mas_reciente)
+            
+            with open(ruta_archivo, 'r', encoding='utf-8') as f:
+                datos_json = json.load(f)
+            
+            datos_recuperados = set(datos_json.get('datos', []))
+            timestamp = datos_json.get('timestamp', '')
+            total_recuperados = len(datos_recuperados)
+            
+            if total_recuperados > 0:
+                print(f"{Fore.YELLOW}🔄 Encontrados datos parciales: {total_recuperados} {tipo}{Style.RESET_ALL}")
+                if confirmar_accion(f"¿Continuar desde donde se quedó? (tienes {total_recuperados} {tipo} guardados)"):
+                    print(f"{Fore.GREEN}✅ Continuando desde datos parciales...{Style.RESET_ALL}")
+                    return (datos_recuperados, timestamp)
+                else:
+                    # Eliminar archivo parcial si no se quiere continuar
+                    os.remove(ruta_archivo)
+                    print(f"{Fore.YELLOW}🗑️ Archivo parcial eliminado, empezando desde cero{Style.RESET_ALL}")
+            
+            return None
+            
+        except Exception as e:
+            print(f"{Fore.YELLOW}⚠️ Error al recuperar datos parciales: {str(e)}{Style.RESET_ALL}")
+            return None
+    
+    def activar_modo_publico(self) -> bool:
+        """
+        Activa el modo de solo perfiles públicos (sin iniciar sesión)
+        
+        Returns:
+            bool: True si se activó correctamente
+        """
+        try:
+            print(f"{Fore.CYAN}🌐 Activando modo solo perfiles públicos...{Style.RESET_ALL}")
+            
+            # Mostrar advertencia sobre limitaciones
+            print(f"{Fore.YELLOW}⚠️ MODO SOLO PERFILES PÚBLICOS{Style.RESET_ALL}")
+            print(f"{Fore.GREEN}✅ Ventajas:{Style.RESET_ALL}")
+            print(f"  • No requiere iniciar sesión")
+            print(f"  • Menor riesgo de detección")
+            print(f"  • No afecta tu cuenta personal")
+            print(f"  • Ideal para perfiles públicos")
+            
+            print(f"\n{Fore.YELLOW}⚠️ Limitaciones:{Style.RESET_ALL}")
+            print(f"  • Solo funciona con perfiles públicos")
+            print(f"  • No puede acceder a perfiles privados")
+            print(f"  • No puede obtener listas de seguidores/seguidos")
+            print(f"  • Solo puede ver información básica del perfil")
+            print(f"  • Funcionalidad limitada por restricciones de Instagram")
+            
+            if confirmar_accion("¿Continuar en modo público?"):
+                self.modo_publico = True
+                self.sesion_activa = False  # No hay sesión real
+                self.username_actual = "modo_publico"
+                
+                print(f"{Fore.GREEN}✅ Modo público activado correctamente{Style.RESET_ALL}")
+                print(f"{Fore.CYAN}💡 Ahora puedes monitorear perfiles públicos sin iniciar sesión{Style.RESET_ALL}")
+                return True
+            else:
+                print(f"{Fore.YELLOW}⚠️ Modo público cancelado{Style.RESET_ALL}")
+                return False
+                
+        except Exception as e:
+            print(f"{Fore.RED}❌ Error al activar modo público: {str(e)}{Style.RESET_ALL}")
+            return False
+    
+    def esta_en_modo_publico(self) -> bool:
+        """
+        Verifica si está en modo público
+        
+        Returns:
+            bool: True si está en modo público
+        """
+        return self.modo_publico
+    
+    def puede_acceder_perfil(self, username: str) -> bool:
+        """
+        Verifica si puede acceder a un perfil según el modo actual
+        
+        Args:
+            username: Nombre de usuario a verificar
+            
+        Returns:
+            bool: True si puede acceder al perfil
+        """
+        try:
+            if self.modo_publico:
+                # En modo público, verificar que el perfil sea público
+                profile = instaloader.Profile.from_username(self.loader.context, username)
+                if profile.is_private:
+                    print(f"{Fore.RED}❌ El perfil '{username}' es privado y estás en modo público{Style.RESET_ALL}")
+                    print(f"{Fore.YELLOW}💡 Para acceder a perfiles privados necesitas iniciar sesión{Style.RESET_ALL}")
+                    return False
+                return True
+            else:
+                # En modo con sesión, verificar autenticación
+                return self.sesion_activa
+                
+        except instaloader.exceptions.ProfileNotExistsException:
+            print(f"{Fore.RED}❌ El perfil '{username}' no existe{Style.RESET_ALL}")
+            return False
+        except Exception as e:
+            print(f"{Fore.RED}❌ Error al verificar perfil: {str(e)}{Style.RESET_ALL}")
+            return False
+
+    def obtener_info_perfil_publico(self, username: str) -> None:
+        """
+        Obtiene información básica de un perfil público (funciona sin autenticación)
+        
+        Args:
+            username: Nombre de usuario a analizar
+        """
+        try:
+            username = limpiar_username(username)
+            if not validar_username(username):
+                print(f"{Fore.RED}❌ Nombre de usuario inválido: {username}{Style.RESET_ALL}")
+                return
+                
+            print(f"{Fore.CYAN}📋 Obteniendo información de @{username}...{Style.RESET_ALL}")
+            
+            # Obtener el perfil sin autenticación
+            profile = instaloader.Profile.from_username(self.loader.context, username)
+            
+            print(f"\n{Fore.CYAN}{'='*50}")
+            print(f"📊 INFORMACIÓN DEL PERFIL: @{username}")
+            print(f"{'='*50}{Style.RESET_ALL}")
+            
+            print(f"\n{Fore.GREEN}👤 Información básica:{Style.RESET_ALL}")
+            print(f"  • Nombre completo: {profile.full_name}")
+            print(f"  • Nombre de usuario: @{profile.username}")
+            print(f"  • Es privado: {'Sí' if profile.is_private else 'No'}")
+            print(f"  • Es verificado: {'Sí' if profile.is_verified else 'No'}")
+            print(f"  • Es cuenta de negocio: {'Sí' if profile.is_business_account else 'No'}")
+            
+            print(f"\n{Fore.BLUE}📊 Estadísticas:{Style.RESET_ALL}")
+            print(f"  • Publicaciones: {formatear_numero(profile.mediacount)}")
+            print(f"  • Seguidores: {formatear_numero(profile.followers)}")
+            print(f"  • Seguidos: {formatear_numero(profile.followees)}")
+            
+            if profile.biography:
+                print(f"\n{Fore.MAGENTA}📝 Biografía:{Style.RESET_ALL}")
+                print(f"  {profile.biography}")
+            
+            if profile.external_url:
+                print(f"\n{Fore.CYAN}🔗 URL externa:{Style.RESET_ALL}")
+                print(f"  {profile.external_url}")
+                
+            if profile.is_private:
+                print(f"\n{Fore.YELLOW}🔒 Este perfil es privado - información limitada disponible{Style.RESET_ALL}")
+                if self.modo_publico:
+                    print(f"{Fore.YELLOW}💡 Para acceder a más información, inicia sesión desde el menú principal{Style.RESET_ALL}")
+            else:
+                print(f"\n{Fore.GREEN}🔓 Este perfil es público - información completa disponible{Style.RESET_ALL}")
+                if self.modo_publico:
+                    print(f"{Fore.YELLOW}💡 Para obtener listas de seguidores/seguidos, inicia sesión desde el menú principal{Style.RESET_ALL}")
+            
+            print(f"\n{Fore.CYAN}{'='*50}{Style.RESET_ALL}")
+            
+        except instaloader.exceptions.ProfileNotExistsException:
+            print(f"{Fore.RED}❌ El perfil '@{username}' no existe{Style.RESET_ALL}")
+        except Exception as e:
+            print(f"{Fore.RED}❌ Error al obtener información del perfil: {str(e)}{Style.RESET_ALL}")
+            if "login" in str(e).lower():
+                print(f"{Fore.YELLOW}💡 Este perfil requiere autenticación. Inicia sesión desde el menú principal.{Style.RESET_ALL}")
     
     def crear_estructura_usuario(self, username: str) -> Dict[str, str]:
         """
@@ -280,16 +627,27 @@ class InstagramMonitor:
     
     def mostrar_estado_sesion(self) -> None:
         """Muestra el estado actual de la sesión"""
-        print(f"\n{Fore.YELLOW}Estado de la Sesión:{Style.RESET_ALL}")
-        if self.sesion_activa:
+        print(f"\n{Fore.YELLOW}📊 Estado del Sistema:{Style.RESET_ALL}")
+        
+        if self.modo_publico:
+            print(f"{Fore.CYAN}🌐 Modo: Solo perfiles públicos")
+            print(f"🔓 Autenticación: No requerida")
+            print(f"👁️ Acceso: Solo perfiles públicos")
+            print(f"🛡️ Riesgo: Muy bajo{Style.RESET_ALL}")
+        elif self.sesion_activa:
             print(f"{Fore.GREEN}✅ Sesión activa")
-            print(f"👤 Usuario: {self.username_actual}{Style.RESET_ALL}")
+            print(f"👤 Usuario: {self.username_actual}")
+            print(f"🔐 Autenticación: Con sesión")
+            print(f"👁️ Acceso: Perfiles públicos y privados{Style.RESET_ALL}")
         else:
-            print(f"{Fore.RED}❌ No hay sesión activa{Style.RESET_ALL}")
+            print(f"{Fore.RED}❌ No hay sesión activa ni modo público")
+            print(f"💡 Opciones disponibles:")
+            print(f"  • Iniciar sesión (acceso completo)")
+            print(f"  • Activar modo público (solo perfiles públicos){Style.RESET_ALL}")
     
     def obtener_seguidores(self, username: str) -> Set[str]:
         """
-        Obtiene la lista de seguidores de un usuario con validaciones mejoradas
+        Obtiene la lista de seguidores de un usuario con validaciones mejoradas y guardado parcial
         
         Args:
             username: Nombre de usuario
@@ -298,9 +656,9 @@ class InstagramMonitor:
             Set[str]: Conjunto de nombres de usuarios seguidores
         """
         try:
-            # Validar que hay sesión activa
-            if not self.sesion_activa:
-                print(f"{Fore.RED}❌ No hay sesión activa. Inicia sesión primero.{Style.RESET_ALL}")
+            # Validar que hay sesión activa O modo público
+            if not self.sesion_activa and not self.modo_publico:
+                print(f"{Fore.RED}❌ Necesitas iniciar sesión o activar modo público primero.{Style.RESET_ALL}")
                 return set()
             
             # Validar y limpiar el nombre de usuario
@@ -309,7 +667,24 @@ class InstagramMonitor:
                 print(f"{Fore.RED}❌ Nombre de usuario inválido: {username}{Style.RESET_ALL}")
                 return set()
             
+            # En lugar de verificar acceso general, verificamos directamente al intentar obtener seguidores
+            # La nueva lógica de perfiles privados se maneja más abajo
+            
             print(f"{Fore.YELLOW}📥 Obteniendo seguidores de {username}...{Style.RESET_ALL}")
+            if self.modo_publico:
+                print(f"{Fore.CYAN}🌐 Modo público: solo perfiles públicos{Style.RESET_ALL}")
+                print(f"{Fore.YELLOW}⚠️ Advertencia: Instagram requiere autenticación para obtener listas de seguidores{Style.RESET_ALL}")
+                print(f"{Fore.YELLOW}💡 Para obtener seguidores necesitas iniciar sesión (opción 1 del menú principal){Style.RESET_ALL}")
+                return set()
+            
+            # Verificar si hay datos parciales para continuar
+            datos_parciales = self._recuperar_datos_parciales(username, 'seguidores')
+            if datos_parciales:
+                seguidores, timestamp = datos_parciales
+                print(f"{Fore.CYAN}🔄 Continuando desde {len(seguidores)} seguidores guardados...{Style.RESET_ALL}")
+            else:
+                seguidores = set()
+                timestamp = self.generar_timestamp()
             
             # Obtener perfil con manejo de errores específicos
             try:
@@ -328,14 +703,38 @@ class InstagramMonitor:
                 return set()
             
             # Verificar si el perfil es privado
-            if profile.is_private and not profile.followed_by_viewer:
-                print(f"{Fore.RED}❌ El perfil '{username}' es privado y no tienes acceso{Style.RESET_ALL}")
-                return set()
+            if profile.is_private:
+                if self.modo_publico:
+                    print(f"{Fore.RED}❌ El perfil '{username}' es privado y estás en modo público{Style.RESET_ALL}")
+                    print(f"{Fore.YELLOW}💡 Cambia a modo con sesión para acceder a perfiles privados{Style.RESET_ALL}")
+                    return set()
+                else:
+                    # Para perfiles privados, intentar acceder a los seguidores directamente
+                    # Instagram permite esto si tienes acceso al perfil
+                    print(f"{Fore.YELLOW}🔒 Perfil privado detectado - verificando acceso...{Style.RESET_ALL}")
+                    try:
+                        # Intentar obtener al menos un seguidor para verificar acceso
+                        test_followers = list(profile.get_followers())
+                        print(f"{Fore.GREEN}✅ Acceso confirmado al perfil privado{Style.RESET_ALL}")
+                    except instaloader.exceptions.PrivateProfileNotFollowedException:
+                        print(f"{Fore.RED}❌ El perfil '{username}' es privado y no tienes acceso{Style.RESET_ALL}")
+                        print(f"{Fore.YELLOW}💡 Debes seguir al perfil para acceder a sus seguidores{Style.RESET_ALL}")
+                        return set()
+                    except Exception as e:
+                        if "private" in str(e).lower() or "follow" in str(e).lower():
+                            print(f"{Fore.RED}❌ No tienes acceso al perfil privado '{username}'{Style.RESET_ALL}")
+                            print(f"{Fore.YELLOW}💡 Debes seguir al perfil para acceder a sus seguidores{Style.RESET_ALL}")
+                            return set()
+                        else:
+                            print(f"{Fore.YELLOW}⚠️ Error al verificar acceso: {str(e)}{Style.RESET_ALL}")
+                            print(f"{Fore.CYAN}🔄 Continuando con la obtención...{Style.RESET_ALL}")
             
-            seguidores = set()
             total_estimado = profile.followers
             
             print(f"  Total estimado: {formatear_numero(total_estimado)}")
+            if len(seguidores) > 0:
+                print(f"  Ya obtenidos: {formatear_numero(len(seguidores))}")
+                print(f"  Restantes: {formatear_numero(total_estimado - len(seguidores))}")
             
             # Verificar si la cuenta tiene demasiados seguidores
             if total_estimado > 10000:
@@ -344,33 +743,83 @@ class InstagramMonitor:
                     return set()
             
             try:
-                contador = 0
+                contador = len(seguidores)  # Empezar desde donde se quedó
+                seguidores_ya_obtenidos = len(seguidores)
+                
                 for follower in profile.get_followers():
+                    # Si ya tenemos este seguidor, saltarlo
+                    if follower.username in seguidores:
+                        continue
+                        
                     seguidores.add(follower.username)
                     contador += 1
                     
-                    # Mostrar progreso cada 50 elementos o cada 1% si es más de 5000
-                    intervalo = min(50, max(1, total_estimado // 100))
-                    if contador % intervalo == 0:
+                    # Guardado parcial cada 250 elementos nuevos
+                    elementos_nuevos = contador - seguidores_ya_obtenidos
+                    if elementos_nuevos > 0 and elementos_nuevos % 250 == 0:
+                        self._guardar_datos_parciales(username, seguidores, 'seguidores', timestamp)
+                    
+                    # Delay inteligente cada pocos elementos
+                    if elementos_nuevos % 10 == 0:
+                        self._wait_if_needed()
+                    
+                    # Mostrar progreso cada 25 elementos o cada 1% si es más de 2500
+                    intervalo = min(25, max(1, total_estimado // 100))
+                    if elementos_nuevos % intervalo == 0:
                         mostrar_barra_progreso(contador, total_estimado)
                     
-                    # Verificar si se debe parar por límites de rate
-                    if contador % 1000 == 0:
-                        print(f"\n{Fore.CYAN}  Procesados {formatear_numero(contador)} seguidores...{Style.RESET_ALL}")
+                    # Pausa más larga cada 100 elementos
+                    if elementos_nuevos % 100 == 0:
+                        print(f"\n{Fore.CYAN}  📊 Procesados {formatear_numero(contador)} seguidores - Pausa de seguridad...{Style.RESET_ALL}")
+                        time.sleep(random.uniform(3.0, 7.0))
+                    
+                    # Si llevamos mucho tiempo, preguntar si continuar
+                    if elementos_nuevos % 500 == 0 and elementos_nuevos > 0:
+                        if not confirmar_accion(f"Se han procesado {contador} seguidores. ¿Continuar? (Instagram puede detectar actividad automatizada)"):
+                            print(f"{Fore.YELLOW}⚠️ Operación detenida por el usuario en {contador} seguidores{Style.RESET_ALL}")
+                            # Guardar progreso antes de salir
+                            self._guardar_datos_parciales(username, seguidores, 'seguidores', timestamp)
+                            return seguidores
                 
                 # Completar la barra de progreso
                 mostrar_barra_progreso(len(seguidores), len(seguidores))
                 print()  # Nueva línea después de la barra
                 
+                # Guardar archivo final y eliminar parcial
+                self._finalizar_archivo_parcial(username, seguidores, 'seguidores', timestamp)
+                
                 print(f"{Fore.GREEN}✅ Total de seguidores obtenidos: {formatear_numero(len(seguidores))}{Style.RESET_ALL}")
                 return seguidores
                 
             except instaloader.exceptions.ConnectionException as e:
-                print(f"\n{Fore.RED}❌ Error de conexión: {str(e)}{Style.RESET_ALL}")
-                print(f"{Fore.YELLOW}💡 Se obtuvieron {len(seguidores)} seguidores antes del error{Style.RESET_ALL}")
-                return seguidores
+                error_msg = str(e)
+                print(f"\n{Fore.RED}❌ Error de conexión: {error_msg}{Style.RESET_ALL}")
+                
+                # Guardar progreso antes de manejar el error
+                if len(seguidores) > 0:
+                    self._guardar_datos_parciales(username, seguidores, 'seguidores', timestamp)
+                
+                # Manejar rate limiting específicamente
+                if self._handle_rate_limit_error(error_msg):
+                    print(f"{Fore.CYAN}🔄 Reintentando obtener seguidores...{Style.RESET_ALL}")
+                    return seguidores
+                else:
+                    print(f"{Fore.YELLOW}💡 Se obtuvieron {len(seguidores)} seguidores antes del error{Style.RESET_ALL}")
+                    return seguidores
+                    
             except Exception as e:
-                print(f"\n{Fore.RED}❌ Error durante la obtención: {str(e)}{Style.RESET_ALL}")
+                error_msg = str(e)
+                print(f"\n{Fore.RED}❌ Error durante la obtención: {error_msg}{Style.RESET_ALL}")
+                
+                # Guardar progreso antes de manejar el error
+                if len(seguidores) > 0:
+                    self._guardar_datos_parciales(username, seguidores, 'seguidores', timestamp)
+                
+                # Verificar si es un error de rate limiting
+                if "rate limit" in error_msg.lower() or "Please wait" in error_msg:
+                    if self._handle_rate_limit_error(error_msg):
+                        return seguidores
+                
                 print(f"{Fore.YELLOW}💡 Se obtuvieron {len(seguidores)} seguidores antes del error{Style.RESET_ALL}")
                 return seguidores
             
@@ -380,7 +829,7 @@ class InstagramMonitor:
     
     def obtener_seguidos(self, username: str) -> Set[str]:
         """
-        Obtiene la lista de usuarios seguidos por un usuario con validaciones mejoradas
+        Obtiene la lista de usuarios seguidos por un usuario con validaciones mejoradas y guardado parcial
         
         Args:
             username: Nombre de usuario
@@ -389,9 +838,9 @@ class InstagramMonitor:
             Set[str]: Conjunto de nombres de usuarios seguidos
         """
         try:
-            # Validar que hay sesión activa
-            if not self.sesion_activa:
-                print(f"{Fore.RED}❌ No hay sesión activa. Inicia sesión primero.{Style.RESET_ALL}")
+            # Validar que hay sesión activa O modo público
+            if not self.sesion_activa and not self.modo_publico:
+                print(f"{Fore.RED}❌ Necesitas iniciar sesión o activar modo público primero.{Style.RESET_ALL}")
                 return set()
             
             # Validar y limpiar el nombre de usuario
@@ -400,7 +849,24 @@ class InstagramMonitor:
                 print(f"{Fore.RED}❌ Nombre de usuario inválido: {username}{Style.RESET_ALL}")
                 return set()
             
+            # En lugar de verificar acceso general, verificamos directamente al intentar obtener seguidos
+            # La nueva lógica de perfiles privados se maneja más abajo
+            
             print(f"{Fore.YELLOW}📤 Obteniendo seguidos de {username}...{Style.RESET_ALL}")
+            if self.modo_publico:
+                print(f"{Fore.CYAN}🌐 Modo público: solo perfiles públicos{Style.RESET_ALL}")
+                print(f"{Fore.YELLOW}⚠️ Advertencia: Instagram requiere autenticación para obtener listas de seguidos{Style.RESET_ALL}")
+                print(f"{Fore.YELLOW}💡 Para obtener seguidos necesitas iniciar sesión (opción 1 del menú principal){Style.RESET_ALL}")
+                return set()
+            
+            # Verificar si hay datos parciales para continuar
+            datos_parciales = self._recuperar_datos_parciales(username, 'seguidos')
+            if datos_parciales:
+                seguidos, timestamp = datos_parciales
+                print(f"{Fore.CYAN}🔄 Continuando desde {len(seguidos)} seguidos guardados...{Style.RESET_ALL}")
+            else:
+                seguidos = set()
+                timestamp = self.generar_timestamp()
             
             # Obtener perfil con manejo de errores específicos
             try:
@@ -419,14 +885,38 @@ class InstagramMonitor:
                 return set()
             
             # Verificar si el perfil es privado
-            if profile.is_private and not profile.followed_by_viewer:
-                print(f"{Fore.RED}❌ El perfil '{username}' es privado y no tienes acceso{Style.RESET_ALL}")
-                return set()
+            if profile.is_private:
+                if self.modo_publico:
+                    print(f"{Fore.RED}❌ El perfil '{username}' es privado y estás en modo público{Style.RESET_ALL}")
+                    print(f"{Fore.YELLOW}💡 Cambia a modo con sesión para acceder a perfiles privados{Style.RESET_ALL}")
+                    return set()
+                else:
+                    # Para perfiles privados, intentar acceder a los seguidos directamente
+                    # Instagram permite esto si tienes acceso al perfil
+                    print(f"{Fore.YELLOW}🔒 Perfil privado detectado - verificando acceso...{Style.RESET_ALL}")
+                    try:
+                        # Intentar obtener al menos un seguido para verificar acceso
+                        test_followees = list(profile.get_followees())
+                        print(f"{Fore.GREEN}✅ Acceso confirmado al perfil privado{Style.RESET_ALL}")
+                    except instaloader.exceptions.PrivateProfileNotFollowedException:
+                        print(f"{Fore.RED}❌ El perfil '{username}' es privado y no tienes acceso{Style.RESET_ALL}")
+                        print(f"{Fore.YELLOW}💡 Debes seguir al perfil para acceder a sus seguidos{Style.RESET_ALL}")
+                        return set()
+                    except Exception as e:
+                        if "private" in str(e).lower() or "follow" in str(e).lower():
+                            print(f"{Fore.RED}❌ No tienes acceso al perfil privado '{username}'{Style.RESET_ALL}")
+                            print(f"{Fore.YELLOW}💡 Debes seguir al perfil para acceder a sus seguidos{Style.RESET_ALL}")
+                            return set()
+                        else:
+                            print(f"{Fore.YELLOW}⚠️ Error al verificar acceso: {str(e)}{Style.RESET_ALL}")
+                            print(f"{Fore.CYAN}🔄 Continuando con la obtención...{Style.RESET_ALL}")
             
-            seguidos = set()
             total_estimado = profile.followees
             
             print(f"  Total estimado: {formatear_numero(total_estimado)}")
+            if len(seguidos) > 0:
+                print(f"  Ya obtenidos: {formatear_numero(len(seguidos))}")
+                print(f"  Restantes: {formatear_numero(total_estimado - len(seguidos))}")
             
             # Verificar si la cuenta sigue a demasiados usuarios
             if total_estimado > 7500:
@@ -435,33 +925,83 @@ class InstagramMonitor:
                     return set()
             
             try:
-                contador = 0
+                contador = len(seguidos)  # Empezar desde donde se quedó
+                seguidos_ya_obtenidos = len(seguidos)
+                
                 for followee in profile.get_followees():
+                    # Si ya tenemos este seguido, saltarlo
+                    if followee.username in seguidos:
+                        continue
+                        
                     seguidos.add(followee.username)
                     contador += 1
                     
-                    # Mostrar progreso cada 50 elementos o cada 1% si es más de 5000
-                    intervalo = min(50, max(1, total_estimado // 100))
-                    if contador % intervalo == 0:
+                    # Guardado parcial cada 250 elementos nuevos
+                    elementos_nuevos = contador - seguidos_ya_obtenidos
+                    if elementos_nuevos > 0 and elementos_nuevos % 250 == 0:
+                        self._guardar_datos_parciales(username, seguidos, 'seguidos', timestamp)
+                    
+                    # Delay inteligente cada pocos elementos
+                    if elementos_nuevos % 10 == 0:
+                        self._wait_if_needed()
+                    
+                    # Mostrar progreso cada 25 elementos o cada 1% si es más de 2500
+                    intervalo = min(25, max(1, total_estimado // 100))
+                    if elementos_nuevos % intervalo == 0:
                         mostrar_barra_progreso(contador, total_estimado)
                     
-                    # Verificar si se debe parar por límites de rate
-                    if contador % 1000 == 0:
-                        print(f"\n{Fore.CYAN}  Procesados {formatear_numero(contador)} seguidos...{Style.RESET_ALL}")
+                    # Pausa más larga cada 100 elementos
+                    if elementos_nuevos % 100 == 0:
+                        print(f"\n{Fore.CYAN}  📊 Procesados {formatear_numero(contador)} seguidos - Pausa de seguridad...{Style.RESET_ALL}")
+                        time.sleep(random.uniform(3.0, 7.0))
+                    
+                    # Si llevamos mucho tiempo, preguntar si continuar
+                    if elementos_nuevos % 500 == 0 and elementos_nuevos > 0:
+                        if not confirmar_accion(f"Se han procesado {contador} seguidos. ¿Continuar? (Instagram puede detectar actividad automatizada)"):
+                            print(f"{Fore.YELLOW}⚠️ Operación detenida por el usuario en {contador} seguidos{Style.RESET_ALL}")
+                            # Guardar progreso antes de salir
+                            self._guardar_datos_parciales(username, seguidos, 'seguidos', timestamp)
+                            return seguidos
                 
                 # Completar la barra de progreso
                 mostrar_barra_progreso(len(seguidos), len(seguidos))
                 print()  # Nueva línea después de la barra
                 
+                # Guardar archivo final y eliminar parcial
+                self._finalizar_archivo_parcial(username, seguidos, 'seguidos', timestamp)
+                
                 print(f"{Fore.GREEN}✅ Total de seguidos obtenidos: {formatear_numero(len(seguidos))}{Style.RESET_ALL}")
                 return seguidos
                 
             except instaloader.exceptions.ConnectionException as e:
-                print(f"\n{Fore.RED}❌ Error de conexión: {str(e)}{Style.RESET_ALL}")
-                print(f"{Fore.YELLOW}💡 Se obtuvieron {len(seguidos)} seguidos antes del error{Style.RESET_ALL}")
-                return seguidos
+                error_msg = str(e)
+                print(f"\n{Fore.RED}❌ Error de conexión: {error_msg}{Style.RESET_ALL}")
+                
+                # Guardar progreso antes de manejar el error
+                if len(seguidos) > 0:
+                    self._guardar_datos_parciales(username, seguidos, 'seguidos', timestamp)
+                
+                # Manejar rate limiting específicamente
+                if self._handle_rate_limit_error(error_msg):
+                    print(f"{Fore.CYAN}🔄 Reintentando obtener seguidos...{Style.RESET_ALL}")
+                    return seguidos
+                else:
+                    print(f"{Fore.YELLOW}💡 Se obtuvieron {len(seguidos)} seguidos antes del error{Style.RESET_ALL}")
+                    return seguidos
+                    
             except Exception as e:
-                print(f"\n{Fore.RED}❌ Error durante la obtención: {str(e)}{Style.RESET_ALL}")
+                error_msg = str(e)
+                print(f"\n{Fore.RED}❌ Error durante la obtención: {error_msg}{Style.RESET_ALL}")
+                
+                # Guardar progreso antes de manejar el error
+                if len(seguidos) > 0:
+                    self._guardar_datos_parciales(username, seguidos, 'seguidos', timestamp)
+                
+                # Verificar si es un error de rate limiting
+                if "rate limit" in error_msg.lower() or "Please wait" in error_msg:
+                    if self._handle_rate_limit_error(error_msg):
+                        return seguidos
+                
                 print(f"{Fore.YELLOW}💡 Se obtuvieron {len(seguidos)} seguidos antes del error{Style.RESET_ALL}")
                 return seguidos
             
@@ -718,8 +1258,8 @@ class InstagramMonitor:
         Args:
             username: Nombre de usuario a monitorear
         """
-        if not self.sesion_activa:
-            print(f"{Fore.RED}❌ Necesitas iniciar sesión primero{Style.RESET_ALL}")
+        if not self.sesion_activa and not self.modo_publico:
+            print(f"{Fore.RED}❌ Necesitas iniciar sesión o activar modo público primero{Style.RESET_ALL}")
             return
         
         # Validar y limpiar username
@@ -729,6 +1269,9 @@ class InstagramMonitor:
         
         username = limpiar_username(username)
         print(f"\n{Fore.CYAN}🔍 Iniciando monitoreo de @{username}...{Style.RESET_ALL}")
+        
+        if self.modo_publico:
+            print(f"{Fore.YELLOW}🌐 Modo público: solo perfiles públicos accesibles{Style.RESET_ALL}")
         
         # Cargar datos anteriores
         datos_anteriores = self.cargar_datos_anteriores(username)
@@ -902,11 +1445,14 @@ class InstagramMonitor:
             username1: Primer perfil
             username2: Segundo perfil
         """
-        if not self.sesion_activa:
-            print(f"{Fore.RED}❌ Necesitas iniciar sesión primero{Style.RESET_ALL}")
+        if not self.sesion_activa and not self.modo_publico:
+            print(f"{Fore.RED}❌ Necesitas iniciar sesión o activar modo público primero{Style.RESET_ALL}")
             return
         
         print(f"\n{Fore.CYAN}🔍 Analizando seguidores mutuos entre @{username1} y @{username2}...{Style.RESET_ALL}")
+        
+        if self.modo_publico:
+            print(f"{Fore.YELLOW}🌐 Modo público: verificando que ambos perfiles sean públicos...{Style.RESET_ALL}")
         
         # Obtener seguidores de ambos perfiles
         seguidores1 = self.obtener_seguidores(username1)
@@ -943,9 +1489,12 @@ class InstagramMonitor:
         Args:
             username: Perfil a analizar
         """
-        if not self.sesion_activa:
+        if not self.sesion_activa and not self.modo_publico:
             print(f"{Fore.RED}❌ Necesitas iniciar sesión primero{Style.RESET_ALL}")
             return
+            
+        if self.modo_publico:
+            print(f"{Fore.YELLOW}📖 Analizando en modo público - Solo perfiles públicos disponibles{Style.RESET_ALL}")
         
         print(f"\n{Fore.CYAN}🔍 Analizando conexiones internas de @{username}...{Style.RESET_ALL}")
         
