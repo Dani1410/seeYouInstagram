@@ -15,6 +15,32 @@ from utils import confirmar_accion
 # Inicializar colorama para colores en Windows
 init()
 
+def verificar_dependencias():
+    """
+    Verifica que todas las dependencias estén instaladas
+    """
+    dependencias_requeridas = {
+        'instaloader': 'instaloader',
+        'colorama': 'colorama'
+    }
+    
+    dependencias_faltantes = []
+    
+    for nombre, modulo in dependencias_requeridas.items():
+        try:
+            __import__(modulo)
+        except ImportError:
+            dependencias_faltantes.append(nombre)
+    
+    if dependencias_faltantes:
+        print(f"{Fore.RED}❌ Faltan las siguientes dependencias:{Style.RESET_ALL}")
+        for dep in dependencias_faltantes:
+            print(f"  - {dep}")
+        print(f"\n{Fore.YELLOW}💡 Instálalas con: pip install {' '.join(dependencias_faltantes)}{Style.RESET_ALL}")
+        return False
+    
+    return True
+
 def mostrar_logo():
     """Muestra el logo del programa"""
     print(f"{Fore.CYAN}{Style.BRIGHT}")
@@ -172,6 +198,11 @@ def main():
 
 if __name__ == "__main__":
     try:
+        # Verificar dependencias antes de empezar
+        if not verificar_dependencias():
+            print(f"{Fore.RED}❌ No se pueden ejecutar el programa sin las dependencias requeridas{Style.RESET_ALL}")
+            sys.exit(1)
+        
         main()
     except KeyboardInterrupt:
         print(f"\n{Fore.YELLOW}Programa interrumpido por el usuario.{Style.RESET_ALL}")

@@ -101,7 +101,7 @@ class InstagramMonitor:
     
     def iniciar_sesion(self, username: str, password: str) -> bool:
         """
-        Inicia sesión en Instagram
+        Inicia sesión en Instagram con manejo mejorado de errores
         
         Args:
             username: Nombre de usuario
@@ -113,36 +113,84 @@ class InstagramMonitor:
         try:
             print(f"{Fore.YELLOW}🔐 Iniciando sesión...{Style.RESET_ALL}")
             
-            # Intentar iniciar sesión
-            self.loader.login(username, password)
+            # Intentar cargar sesión existente primero
+            carpetas = self.crear_estructura_usuario(username)
+            archivo_sesion = os.path.join(carpetas["sesiones"], f"{username}_session")
             
-            # Verificar si se necesita 2FA
-            if hasattr(self.loader.context, '_session'):
-                print(f"{Fore.GREEN}✅ Sesión iniciada correctamente para {username}{Style.RESET_ALL}")
-                self.sesion_activa = True
-                self.username_actual = username
-                return True
-                
-        except instaloader.TwoFactorAuthRequiredException:
-            print(f"{Fore.YELLOW}🔒 Se requiere autenticación de dos factores{Style.RESET_ALL}")
-            codigo_2fa = input(f"{Fore.CYAN}Ingresa el código 2FA: {Style.RESET_ALL}")
+            if os.path.exists(archivo_sesion):
+                try:
+                    print(f"{Fore.CYAN}📁 Intentando cargar sesión guardada...{Style.RESET_ALL}")
+                    self.loader.load_session_from_file(username, archivo_sesion)
+                    
+                    # Verificar si la sesión sigue siendo válida
+                    if hasattr(self.loader.context, '_session') and self.loader.context._session:
+                        print(f"{Fore.GREEN}✅ Sesión guardada cargada correctamente para {username}{Style.RESET_ALL}")
+                        self.sesion_activa = True
+                        self.username_actual = username
+                        return True
+                    else:
+                        print(f"{Fore.YELLOW}⚠️ La sesión guardada no es válida{Style.RESET_ALL}")
+                except Exception as e:
+                    print(f"{Fore.YELLOW}⚠️ Error al cargar sesión guardada: {str(e)}{Style.RESET_ALL}")
+                    print(f"{Fore.CYAN}🔄 Procediendo con login manual...{Style.RESET_ALL}")
             
+            # Intentar iniciar sesión manual
             try:
-                self.loader.two_factor_login(codigo_2fa)
-                print(f"{Fore.GREEN}✅ Sesión iniciada correctamente para {username}{Style.RESET_ALL}")
-                self.sesion_activa = True
-                self.username_actual = username
-                return True
+                self.loader.login(username, password)
+                
+                # Verificar que la sesión se estableció correctamente
+                if hasattr(self.loader.context, '_session') and self.loader.context._session:
+                    print(f"{Fore.GREEN}✅ Sesión iniciada correctamente para {username}{Style.RESET_ALL}")
+                    self.sesion_activa = True
+                    self.username_actual = username
+                    
+                    # Guardar la sesión nueva
+                    try:
+                        self.loader.save_session_to_file(archivo_sesion)
+                        print(f"{Fore.GREEN}💾 Sesión guardada en: {archivo_sesion}{Style.RESET_ALL}")
+                    except Exception as e:
+                        print(f"{Fore.YELLOW}⚠️ No se pudo guardar la sesión: {str(e)}{Style.RESET_ALL}")
+                    
+                    return True
+                else:
+                    print(f"{Fore.RED}❌ No se pudo establecer la sesión correctamente{Style.RESET_ALL}")
+                    return False
+                    
+            except instaloader.TwoFactorAuthRequiredException:
+                print(f"{Fore.YELLOW}🔒 Se requiere autenticación de dos factores{Style.RESET_ALL}")
+                codigo_2fa = input(f"{Fore.CYAN}Ingresa el código 2FA: {Style.RESET_ALL}")
+                
+                try:
+                    self.loader.two_factor_login(codigo_2fa)
+                    print(f"{Fore.GREEN}✅ Autenticación 2FA exitosa para {username}{Style.RESET_ALL}")
+                    self.sesion_activa = True
+                    self.username_actual = username
+                    
+                    # Guardar la sesión
+                    try:
+                        self.loader.save_session_to_file(archivo_sesion)
+                        print(f"{Fore.GREEN}💾 Sesión guardada{Style.RESET_ALL}")
+                    except Exception as e:
+                        print(f"{Fore.YELLOW}⚠️ No se pudo guardar la sesión: {str(e)}{Style.RESET_ALL}")
+                    
+                    return True
+                except Exception as e:
+                    print(f"{Fore.RED}❌ Error en autenticación 2FA: {str(e)}{Style.RESET_ALL}")
+                    return False
+                    
+            except instaloader.BadCredentialsException:
+                print(f"{Fore.RED}❌ Credenciales incorrectas para {username}{Style.RESET_ALL}")
+                return False
+            except instaloader.exceptions.ConnectionException as e:
+                print(f"{Fore.RED}❌ Error de conexión: {str(e)}{Style.RESET_ALL}")
+                print(f"{Fore.YELLOW}💡 Verifica tu conexión a internet{Style.RESET_ALL}")
+                return False
             except Exception as e:
-                print(f"{Fore.RED}❌ Error en autenticación 2FA: {e}{Style.RESET_ALL}")
+                print(f"{Fore.RED}❌ Error inesperado al iniciar sesión: {str(e)}{Style.RESET_ALL}")
                 return False
                 
-        except instaloader.BadCredentialsException:
-            print(f"{Fore.RED}❌ Credenciales incorrectas{Style.RESET_ALL}")
-            return False
-            
         except Exception as e:
-            print(f"{Fore.RED}❌ Error al iniciar sesión: {e}{Style.RESET_ALL}")
+            print(f"{Fore.RED}❌ Error crítico en iniciar_sesion: {str(e)}{Style.RESET_ALL}")
             return False
     
     def guardar_sesion(self) -> bool:
@@ -241,7 +289,7 @@ class InstagramMonitor:
     
     def obtener_seguidores(self, username: str) -> Set[str]:
         """
-        Obtiene la lista de seguidores de un usuario
+        Obtiene la lista de seguidores de un usuario con validaciones mejoradas
         
         Args:
             username: Nombre de usuario
@@ -250,31 +298,89 @@ class InstagramMonitor:
             Set[str]: Conjunto de nombres de usuarios seguidores
         """
         try:
-            profile = instaloader.Profile.from_username(self.loader.context, username)
-            seguidores = set()
+            # Validar que hay sesión activa
+            if not self.sesion_activa:
+                print(f"{Fore.RED}❌ No hay sesión activa. Inicia sesión primero.{Style.RESET_ALL}")
+                return set()
+            
+            # Validar y limpiar el nombre de usuario
+            username = limpiar_username(username)
+            if not validar_username(username):
+                print(f"{Fore.RED}❌ Nombre de usuario inválido: {username}{Style.RESET_ALL}")
+                return set()
             
             print(f"{Fore.YELLOW}📥 Obteniendo seguidores de {username}...{Style.RESET_ALL}")
-            print(f"  Total estimado: {formatear_numero(profile.followers)}")
             
-            for follower in profile.get_followers():
-                seguidores.add(follower.username)
-                if len(seguidores) % 50 == 0:  # Mostrar progreso cada 50
-                    mostrar_barra_progreso(len(seguidores), profile.followers)
+            # Obtener perfil con manejo de errores específicos
+            try:
+                profile = instaloader.Profile.from_username(self.loader.context, username)
+            except instaloader.exceptions.ProfileNotExistsException:
+                print(f"{Fore.RED}❌ El perfil '{username}' no existe{Style.RESET_ALL}")
+                return set()
+            except instaloader.exceptions.LoginRequiredException:
+                print(f"{Fore.RED}❌ Se requiere iniciar sesión para acceder a este perfil{Style.RESET_ALL}")
+                return set()
+            except instaloader.exceptions.PrivateProfileNotFollowedException:
+                print(f"{Fore.RED}❌ El perfil '{username}' es privado y no lo sigues{Style.RESET_ALL}")
+                return set()
+            except Exception as e:
+                print(f"{Fore.RED}❌ Error al obtener el perfil: {str(e)}{Style.RESET_ALL}")
+                return set()
             
-            # Completar la barra de progreso
-            mostrar_barra_progreso(len(seguidores), len(seguidores))
-            print()  # Nueva línea después de la barra
+            # Verificar si el perfil es privado
+            if profile.is_private and not profile.followed_by_viewer:
+                print(f"{Fore.RED}❌ El perfil '{username}' es privado y no tienes acceso{Style.RESET_ALL}")
+                return set()
             
-            print(f"{Fore.GREEN}✅ Total de seguidores: {formatear_numero(len(seguidores))}{Style.RESET_ALL}")
-            return seguidores
+            seguidores = set()
+            total_estimado = profile.followers
+            
+            print(f"  Total estimado: {formatear_numero(total_estimado)}")
+            
+            # Verificar si la cuenta tiene demasiados seguidores
+            if total_estimado > 10000:
+                if not confirmar_accion(f"El perfil tiene {formatear_numero(total_estimado)} seguidores. Esto puede tardar mucho tiempo. ¿Continuar?"):
+                    print(f"{Fore.YELLOW}⚠️ Operación cancelada por el usuario{Style.RESET_ALL}")
+                    return set()
+            
+            try:
+                contador = 0
+                for follower in profile.get_followers():
+                    seguidores.add(follower.username)
+                    contador += 1
+                    
+                    # Mostrar progreso cada 50 elementos o cada 1% si es más de 5000
+                    intervalo = min(50, max(1, total_estimado // 100))
+                    if contador % intervalo == 0:
+                        mostrar_barra_progreso(contador, total_estimado)
+                    
+                    # Verificar si se debe parar por límites de rate
+                    if contador % 1000 == 0:
+                        print(f"\n{Fore.CYAN}  Procesados {formatear_numero(contador)} seguidores...{Style.RESET_ALL}")
+                
+                # Completar la barra de progreso
+                mostrar_barra_progreso(len(seguidores), len(seguidores))
+                print()  # Nueva línea después de la barra
+                
+                print(f"{Fore.GREEN}✅ Total de seguidores obtenidos: {formatear_numero(len(seguidores))}{Style.RESET_ALL}")
+                return seguidores
+                
+            except instaloader.exceptions.ConnectionException as e:
+                print(f"\n{Fore.RED}❌ Error de conexión: {str(e)}{Style.RESET_ALL}")
+                print(f"{Fore.YELLOW}💡 Se obtuvieron {len(seguidores)} seguidores antes del error{Style.RESET_ALL}")
+                return seguidores
+            except Exception as e:
+                print(f"\n{Fore.RED}❌ Error durante la obtención: {str(e)}{Style.RESET_ALL}")
+                print(f"{Fore.YELLOW}💡 Se obtuvieron {len(seguidores)} seguidores antes del error{Style.RESET_ALL}")
+                return seguidores
             
         except Exception as e:
-            print(f"{Fore.RED}❌ Error al obtener seguidores: {e}{Style.RESET_ALL}")
+            print(f"{Fore.RED}❌ Error crítico al obtener seguidores: {str(e)}{Style.RESET_ALL}")
             return set()
     
     def obtener_seguidos(self, username: str) -> Set[str]:
         """
-        Obtiene la lista de usuarios seguidos por un usuario
+        Obtiene la lista de usuarios seguidos por un usuario con validaciones mejoradas
         
         Args:
             username: Nombre de usuario
@@ -283,23 +389,85 @@ class InstagramMonitor:
             Set[str]: Conjunto de nombres de usuarios seguidos
         """
         try:
-            profile = instaloader.Profile.from_username(self.loader.context, username)
-            seguidos = set()
+            # Validar que hay sesión activa
+            if not self.sesion_activa:
+                print(f"{Fore.RED}❌ No hay sesión activa. Inicia sesión primero.{Style.RESET_ALL}")
+                return set()
+            
+            # Validar y limpiar el nombre de usuario
+            username = limpiar_username(username)
+            if not validar_username(username):
+                print(f"{Fore.RED}❌ Nombre de usuario inválido: {username}{Style.RESET_ALL}")
+                return set()
             
             print(f"{Fore.YELLOW}📤 Obteniendo seguidos de {username}...{Style.RESET_ALL}")
-            print(f"  Total estimado: {formatear_numero(profile.followees)}")
             
-            for followee in profile.get_followees():
-                seguidos.add(followee.username)
-                if len(seguidos) % 50 == 0:  # Mostrar progreso cada 50
-                    mostrar_barra_progreso(len(seguidos), profile.followees)
+            # Obtener perfil con manejo de errores específicos
+            try:
+                profile = instaloader.Profile.from_username(self.loader.context, username)
+            except instaloader.exceptions.ProfileNotExistsException:
+                print(f"{Fore.RED}❌ El perfil '{username}' no existe{Style.RESET_ALL}")
+                return set()
+            except instaloader.exceptions.LoginRequiredException:
+                print(f"{Fore.RED}❌ Se requiere iniciar sesión para acceder a este perfil{Style.RESET_ALL}")
+                return set()
+            except instaloader.exceptions.PrivateProfileNotFollowedException:
+                print(f"{Fore.RED}❌ El perfil '{username}' es privado y no lo sigues{Style.RESET_ALL}")
+                return set()
+            except Exception as e:
+                print(f"{Fore.RED}❌ Error al obtener el perfil: {str(e)}{Style.RESET_ALL}")
+                return set()
             
-            # Completar la barra de progreso
-            mostrar_barra_progreso(len(seguidos), len(seguidos))
-            print()  # Nueva línea después de la barra
+            # Verificar si el perfil es privado
+            if profile.is_private and not profile.followed_by_viewer:
+                print(f"{Fore.RED}❌ El perfil '{username}' es privado y no tienes acceso{Style.RESET_ALL}")
+                return set()
             
-            print(f"{Fore.GREEN}✅ Total de seguidos: {formatear_numero(len(seguidos))}{Style.RESET_ALL}")
-            return seguidos
+            seguidos = set()
+            total_estimado = profile.followees
+            
+            print(f"  Total estimado: {formatear_numero(total_estimado)}")
+            
+            # Verificar si la cuenta sigue a demasiados usuarios
+            if total_estimado > 7500:
+                if not confirmar_accion(f"El perfil sigue a {formatear_numero(total_estimado)} usuarios. Esto puede tardar mucho tiempo. ¿Continuar?"):
+                    print(f"{Fore.YELLOW}⚠️ Operación cancelada por el usuario{Style.RESET_ALL}")
+                    return set()
+            
+            try:
+                contador = 0
+                for followee in profile.get_followees():
+                    seguidos.add(followee.username)
+                    contador += 1
+                    
+                    # Mostrar progreso cada 50 elementos o cada 1% si es más de 5000
+                    intervalo = min(50, max(1, total_estimado // 100))
+                    if contador % intervalo == 0:
+                        mostrar_barra_progreso(contador, total_estimado)
+                    
+                    # Verificar si se debe parar por límites de rate
+                    if contador % 1000 == 0:
+                        print(f"\n{Fore.CYAN}  Procesados {formatear_numero(contador)} seguidos...{Style.RESET_ALL}")
+                
+                # Completar la barra de progreso
+                mostrar_barra_progreso(len(seguidos), len(seguidos))
+                print()  # Nueva línea después de la barra
+                
+                print(f"{Fore.GREEN}✅ Total de seguidos obtenidos: {formatear_numero(len(seguidos))}{Style.RESET_ALL}")
+                return seguidos
+                
+            except instaloader.exceptions.ConnectionException as e:
+                print(f"\n{Fore.RED}❌ Error de conexión: {str(e)}{Style.RESET_ALL}")
+                print(f"{Fore.YELLOW}💡 Se obtuvieron {len(seguidos)} seguidos antes del error{Style.RESET_ALL}")
+                return seguidos
+            except Exception as e:
+                print(f"\n{Fore.RED}❌ Error durante la obtención: {str(e)}{Style.RESET_ALL}")
+                print(f"{Fore.YELLOW}💡 Se obtuvieron {len(seguidos)} seguidos antes del error{Style.RESET_ALL}")
+                return seguidos
+            
+        except Exception as e:
+            print(f"{Fore.RED}❌ Error crítico al obtener seguidos: {str(e)}{Style.RESET_ALL}")
+            return set()
             
         except Exception as e:
             print(f"{Fore.RED}❌ Error al obtener seguidos: {e}{Style.RESET_ALL}")
